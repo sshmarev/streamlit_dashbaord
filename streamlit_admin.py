@@ -234,39 +234,41 @@ def plot_funnel_plotly(data, avg_days):
     if not data or pd.DataFrame(data).empty:
         st.info("Нет данных для построения воронки за выбранный период.")
         return
-        
+
     df = pd.DataFrame(data)
-    
-    # --- ИЗМЕНЕНИЯ ЗДЕСЬ ---
-    
-    # 1. Рассчитываем новый столбец: процент от первого этапа
-    df["% от общего"] = (df["count"] / df["count"].iloc[0] * 100).round(1)
+
+    # Безопасные расчёты процентов
+    df = df.copy()
+    total = float(df["count"].iloc[0]) if df["count"].iloc[0] else 0.0
+    pct_total = []
+    pct_prev = []
+    prev = None
+    for i, val in enumerate(df["count"].tolist()):
+        # % от общего
+        pct_total.append(round((val / total * 100.0), 1) if total > 0 else 0.0)
+        # % от предыдущего (для первого шага считаем 100%)
+        if i == 0:
+            pct_prev.append(100.0)
+        else:
+            pct_prev.append(round((val / prev * 100.0), 1) if prev and prev > 0 else 0.0)
+        prev = val
+
+    df["% от общего"] = pct_total
+    df["% от предыдущего"] = pct_prev
 
     fig = go.Figure(go.Funnel(
-        y = df["stage"],
-        x = df["count"],
-        textposition = "inside",
-        constraintext = 'inside',
-        textfont = dict(size=12, color='white'),
-        
-        # 2. Вместо textinfo используем кастомный texttemplate
-        # %{value} - абсолютное число
-        # %{percentPrevious:.1%} - процент от предыдущего шага
-        # %{customdata[0]:.1f} - наш новый расчет
-        texttemplate = "<b>%{value}</b><br>%{percentPrevious:.1%}<br><i>%{customdata[0]:.1f}% от всех</i>",
-        
-        # 3. Передаем наши расчеты в customdata
-        customdata = df[['% от общего']]
+        y=df["stage"],
+        x=df["count"],
+        textposition="inside",
+        constraintext='inside',
+        textfont=dict(size=12, color='white'),
+        # две метрики из customdata: [pct_prev, pct_total]
+        customdata=df[["% от предыдущего", "% от общего"]],
+        texttemplate="<b>%{value}</b><br>%{customdata[0]:.1f}% от предыдущего<br><i>%{customdata[1]:.1f}% от всех</i>",
     ))
-    
+
     title = f"🔻 Воронка: путь пользователя (в среднем {avg_days} дн. до покупки)" if avg_days else "🔻 Воронка: путь пользователя"
-    
-    fig.update_layout(
-        title_text=title,
-        height=600,
-        margin=dict(l=200, r=50, t=50, b=50)
-    )
-    
+    fig.update_layout(title_text=title, height=600, margin=dict(l=200, r=50, t=50, b=50))
     st.plotly_chart(fig, use_container_width=True)
 
 def plot_retention_heatmap(df):

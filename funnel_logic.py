@@ -62,6 +62,13 @@ steps = [
           AND (array_length($1::text[], 1) IS NULL OR u.source = ANY($1::text[]))
           AND u.created_at::date BETWEEN $2 AND $3
     """),
+     ("Вызвали /subscribe", """
+        SELECT COUNT(DISTINCT ua.user_id) FROM user_actions ua
+        JOIN users u ON u.id = ua.user_id
+        WHERE ua.action = 'subscribe_cmd'
+          AND (array_length($1::text[], 1) IS NULL OR u.source = ANY($1::text[]))
+          AND u.created_at::date BETWEEN $2 AND $3
+    """),
     ("Открыли оплату", """
         SELECT COUNT(DISTINCT ua.user_id) FROM user_actions ua
         JOIN users u ON u.id = ua.user_id
