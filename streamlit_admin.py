@@ -272,98 +272,128 @@ def plot_funnel_plotly(data, avg_days):
     st.plotly_chart(fig, use_container_width=True)
 
 def plot_retention_heatmap(df):
+    import plotly.express as px
+
     if df.empty or 'cohort_week' not in df.columns:
         st.info("Недостаточно данных для построения когортного анализа.")
         return
-        
+
     cohort_sizes = df[df['week_number'] == 0].set_index('cohort_week')['retained_users']
     if cohort_sizes.empty:
         st.info("Недостаточно данных для расчета размеров когорт.")
         return
-        
+
+    df = df.copy()
     df['cohort_size'] = df['cohort_week'].map(cohort_sizes)
     df['retention'] = (df['retained_users'] / df['cohort_size']) * 100
-    
-    # Сводная таблица с ПРОЦЕНТАМИ для цвета
+
+    # ПРОЦЕНТЫ для цвета
     retention_pivot = df.pivot_table(index='cohort_week', columns='week_number', values='retention')
-    # Сводная таблица с АБСОЛЮТНЫМИ ЧИСЛАМИ для текста
+    # АБСОЛЮТНЫЕ для текста
     absolute_pivot = df.pivot_table(index='cohort_week', columns='week_number', values='retained_users')
 
-    # Формируем матрицу с кастомным текстом
-    text_matrix = []
-    for week in retention_pivot.index:
-        row = []
-        for col in retention_pivot.columns:
-            retention_val = retention_pivot.loc[week, col]
-            absolute_val = absolute_pivot.loc[week, col]
-            
-            if pd.isna(retention_val):
-                row.append("")
-            else:
-                # --- ИЗМЕНЕНИЕ 1: Убираем перенос строки ---
-                row.append(f"{retention_val:.1f}% ({int(absolute_val)})")
-        text_matrix.append(row)
+    # Подписи вида "12.3% (5)"
+    text_matrix = [
+        [
+            "" if pd.isna(retention_pivot.loc[idx, col]) else f"{retention_pivot.loc[idx, col]:.1f}% ({int(absolute_pivot.loc[idx, col])})"
+            for col in retention_pivot.columns
+        ]
+        for idx in retention_pivot.index
+    ]
 
-    retention_pivot.index = pd.to_datetime(retention_pivot.index).strftime('%Y-%m-%d')
-    
-    # --- ИЗМЕНЕНИЕ 2: Задаем диапазон цвета и саму цветовую схему ---
-    fig = px.imshow(retention_pivot,
-                    labels=dict(x="Неделя после регистрации", y="Когорта (неделя регистрации)", color="Удержание, %"),
-                    title="🗺️ Когортный анализ удержания пользователей (по неделям)",
-                    color_continuous_scale='Blues', # <-- Делаем схему более приятной
-                    range_color=[0, 100] # <-- Фиксируем шкалу от 0 до 100
-                   )
-    
-    # Обновляем график, чтобы он использовал нашу кастомную текстовую матрицу
-    fig.update_traces(
-        text=text_matrix, 
-        texttemplate="%{text}", 
-        textfont_size=9 # <-- Немного уменьшим шрифт для лучшего вида
+    # Красивые метки индекса
+    try:
+        retention_pivot.index = pd.to_datetime(retention_pivot.index).strftime('%Y-%m-%d')
+    except Exception:
+        pass  # если уже строки — оставим как есть
+
+    fig = px.imshow(
+        retention_pivot,
+        labels=dict(x="Неделя после регистрации", y="Когорта (неделя регистрации)", color="Удержание, %"),
+        title="🗺️ Когортный анализ удержания пользователей (по неделям)",
+        color_continuous_scale='Blues',
+        range_color=[0, 100],
+        aspect="auto"
     )
-    
+
+    fig.update_traces(text=text_matrix, texttemplate="%{text}", textfont_size=9)
+
+    # 🔑 динамическая высота
+    num_rows = retention_pivot.shape[0]  # либо: df['cohort_week'].nunique()
+    row_height = 30  # подстрой по вкусу (25–35)
+    fig.update_layout(height=max(300, num_rows * row_height),
+                      margin=dict(l=100, r=50, t=50, b=50))
+
     fig.update_xaxes(side="top")
     st.plotly_chart(fig, use_container_width=True)
 
+
 def plot_trial_retention_heatmap(df):
-    if df.empty or 'cohort_day' not in df.columns:
-        st.info("Нет данных для построения когортного анализа триала.")
+    import plotly.express as px
+    # ожидаем, что есть: import pandas as pd, import streamlit as st
+
+    if df.empty or not {'cohort_day', 'day_number', 'retained_users'}.issubset(df.columns):
+        st.info("Недостаточно данных для построения удержания по триалу.")
         return
-    
-    # ВОЗВРАЩЕНО: Расчет размеров когорт по Дню 0
-    cohort_sizes = df[df['day_number'] == 1].set_index('cohort_day')['retained_users']
-    if cohort_sizes.empty:
-        st.info("Недостаточно данных для расчета размеров когорт триала.")
-        return
-    
-    df['cohort_size'] = df['cohort_day'].map(cohort_sizes)
-    df['retention'] = (df['retained_users'] / df['cohort_size']) * 100
-    
+
+    df = df.copy()
+
+    # cohort_size как в старой логике: берем retained_users на day 0
+    sizes = df[df['day_number'] == 0].set_index('cohort_day')['retained_users']
+    if sizes.empty:
+        # запасной вариант, чтобы график не падал, если day 0 отсутствует
+        sizes = df.groupby('cohort_day')['retained_users'].max()
+
+    df['cohort_size'] = df['cohort_day'].map(sizes).astype(float)
+    df['retention'] = (df['retained_users'] / df['cohort_size']).replace([float('inf'), -float('inf')], 0).fillna(0) * 100
+
+    # сводные: проценты для цвета, абсолюты для подписи
     retention_pivot = df.pivot_table(index='cohort_day', columns='day_number', values='retention')
-    absolute_pivot = df.pivot_table(index='cohort_day', columns='day_number', values='retained_users')
+    absolute_pivot  = df.pivot_table(index='cohort_day', columns='day_number', values='retained_users')
 
-    text_matrix = []
-    for day_index in retention_pivot.index:
-        row = []
-        for day_col in retention_pivot.columns:
-            retention_val = retention_pivot.loc[day_index, day_col]
-            absolute_val = absolute_pivot.loc[day_index, day_col]
-            if pd.isna(retention_val):
-                row.append("")
-            else:
-                row.append(f"{retention_val:.1f}% ({int(absolute_val)})")
-        text_matrix.append(row)
+    # упорядочим колонки 0..4
+    cols = sorted([c for c in retention_pivot.columns if pd.notna(c)])
+    retention_pivot = retention_pivot.reindex(columns=cols)
+    absolute_pivot  = absolute_pivot.reindex(columns=cols)
 
-    retention_pivot.index = pd.to_datetime(retention_pivot.index).strftime('%Y-%m-%d')
-    
-    fig = px.imshow(retention_pivot,
-                    # ВОЗВРАЩЕНО: Старая подпись оси
-                    labels=dict(x="День после начала триала (0 = день активации)", y="Когорта (дата активации)", color="Удержание, %"),
-                    title="🎯 Удержание пользователей в 5-дневном триале",
-                    color_continuous_scale='Greens', range_color=[0, 100])
-    
-    fig.update_traces(text=text_matrix, texttemplate="%{text}", textfont_size=10)
+    # подписи "12.3% (5)"
+    text_matrix = [
+        [
+            "" if pd.isna(retention_pivot.loc[idx, col])
+            else f"{retention_pivot.loc[idx, col]:.1f}% ({int(absolute_pivot.loc[idx, col])})"
+            for col in retention_pivot.columns
+        ]
+        for idx in retention_pivot.index
+    ]
+
+    # красивые метки дат
+    try:
+        retention_pivot.index = pd.to_datetime(retention_pivot.index).strftime('%b %d, %Y')
+    except Exception:
+        pass
+
+    fig = px.imshow(
+        retention_pivot,
+        labels=dict(x="День после начала триала (0 = день активации)", y="Когорта (дата активации)", color="Удержание, %"),
+        title="🎯 Удержание в рамках 5-дневного триала",
+        color_continuous_scale='Greens',
+        range_color=[0, 100],
+        aspect="auto"
+    )
+    fig.update_traces(text=text_matrix, texttemplate="%{text}", textfont_size=9)
     fig.update_xaxes(side="top")
-    st.plotly_chart(fig, use_container_width=True)   
+
+    # 🔑 авто-высота: одна строка ≈ 30 px
+    num_rows = retention_pivot.shape[0]
+    row_height = 30
+    fig.update_layout(
+        height=max(320, num_rows * row_height),
+        margin=dict(l=110, r=50, t=60, b=50)
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
 
 
 # --- ГЛАВНЫЙ КОД ---
