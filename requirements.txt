@@ -1,4 +1,5 @@
 streamlit
 asyncpg
 pandas
-plotlygit 
+plotly
+altair
