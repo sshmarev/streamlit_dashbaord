@@ -8,7 +8,7 @@ from datetime import date, timedelta
 import altair as alt
 import plotly.express as px
 import plotly.graph_objects as go
-from funnel_logic import fetch_activation_funnel, fetch_funnel_stats, _fetch_trial_retention_cohorts
+import funnel_logic
 
 st.set_page_config(layout="wide")
 
@@ -196,7 +196,42 @@ async def _fetch_total_paying_users(pool):
 # --- СИНХРОННЫЕ ОБЕРТКИ С КЕШИРОВАНИЕМ ---
 
 async def _fetch_activation_funnel(pool, sources, start_date, end_date):
-    return await fetch_activation_funnel(pool, sources, start_date, end_date)
+    return await funnel_logic.fetch_activation_funnel(pool, sources, start_date, end_date)
+
+async def _fetch_trial_retention_cohorts_local(pool):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            WITH trial_cohorts AS (
+                SELECT user_id, date_trunc('day', MIN(created_at))::date AS cohort_day
+                FROM user_actions
+                WHERE action IN ('trial_started', 'trial_activated')
+                GROUP BY user_id
+            ),
+            user_activity AS (
+                SELECT DISTINCT user_id, date_trunc('day', created_at)::date AS activity_day
+                FROM meals
+            )
+            SELECT
+                c.cohort_day,
+                (a.activity_day - c.cohort_day) AS day_number,
+                COUNT(DISTINCT c.user_id) AS retained_users
+            FROM trial_cohorts c
+            JOIN user_activity a ON c.user_id = a.user_id AND a.activity_day >= c.cohort_day
+            WHERE (a.activity_day - c.cohort_day) BETWEEN 0 AND 4
+            GROUP BY c.cohort_day, day_number
+            ORDER BY c.cohort_day, day_number
+        """)
+    return pd.DataFrame(rows, columns=["cohort_day", "day_number", "retained_users"])
+
+async def _fetch_trial_retention_cohorts(pool):
+    fetcher = getattr(
+        funnel_logic,
+        "fetch_trial_retention_cohorts",
+        getattr(funnel_logic, "_fetch_trial_retention_cohorts", None),
+    )
+    if fetcher is None:
+        return await _fetch_trial_retention_cohorts_local(pool)
+    return await fetcher(pool)
 
 async def _fetch_day_retention(pool, anchor='registration'):
     if anchor not in {'registration', 'first_meal'}:
@@ -460,7 +495,7 @@ def fetch_sources_cached():
 
 @st.cache_data(ttl=600)
 def fetch_funnel_stats_cached(sources, start_date, end_date):
-    return loop.run_until_complete(fetch_funnel_stats(pool, sources, start_date, end_date))
+    return loop.run_until_complete(funnel_logic.fetch_funnel_stats(pool, sources, start_date, end_date))
 
 @st.cache_data(ttl=600)
 def fetch_activation_funnel_cached(sources, start_date, end_date):

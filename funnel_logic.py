@@ -261,7 +261,7 @@ async def fetch_activation_funnel(pool: asyncpg.Pool, sources: List[str], start_
     return funnel
 
 
-async def _fetch_trial_retention_cohorts(pool: asyncpg.Pool) -> pd.DataFrame:
+async def fetch_trial_retention_cohorts(pool: asyncpg.Pool) -> pd.DataFrame:
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             WITH trial_cohorts AS (
@@ -285,3 +285,7 @@ async def _fetch_trial_retention_cohorts(pool: asyncpg.Pool) -> pd.DataFrame:
             ORDER BY c.cohort_day, day_number
         """)
     return pd.DataFrame(rows, columns=["cohort_day", "day_number", "retained_users"])
+
+
+async def _fetch_trial_retention_cohorts(pool: asyncpg.Pool) -> pd.DataFrame:
+    return await fetch_trial_retention_cohorts(pool)
