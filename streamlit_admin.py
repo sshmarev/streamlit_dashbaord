@@ -233,7 +233,7 @@ async def _fetch_trial_retention_cohorts(pool):
         return await _fetch_trial_retention_cohorts_local(pool)
     return await fetcher(pool)
 
-async def _fetch_day_retention(pool, anchor='registration'):
+async def _fetch_day_retention(pool, anchor='registration', start_date=None, end_date=None):
     if anchor not in {'registration', 'first_meal'}:
         anchor = 'registration'
     anchor_sql = (
@@ -243,11 +243,18 @@ async def _fetch_day_retention(pool, anchor='registration'):
     )
     async with pool.acquire() as conn:
         rows = await conn.fetch(f"""
-            WITH anchors AS ({anchor_sql}),
+            WITH anchors AS (
+                SELECT *
+                FROM ({anchor_sql}) raw_anchors
+                WHERE cohort_day BETWEEN $1 AND $2
+            ),
             cohort_sizes AS (
                 SELECT cohort_day, COUNT(DISTINCT user_id) AS cohort_size
                 FROM anchors
                 GROUP BY cohort_day
+            ),
+            day_offsets(day_number) AS (
+                VALUES (0), (1), (3), (7), (14), (30)
             ),
             activity AS (
                 SELECT DISTINCT user_id, created_at::date AS activity_day
@@ -255,16 +262,19 @@ async def _fetch_day_retention(pool, anchor='registration'):
             )
             SELECT
                 a.cohort_day,
-                (act.activity_day - a.cohort_day) AS day_number,
+                d.day_number,
                 cs.cohort_size,
-                COUNT(DISTINCT a.user_id) AS retained_users
+                COUNT(DISTINCT act.user_id) AS retained_users
             FROM anchors a
             JOIN cohort_sizes cs ON cs.cohort_day = a.cohort_day
-            LEFT JOIN activity act ON act.user_id = a.user_id AND act.activity_day >= a.cohort_day
-            WHERE (act.activity_day - a.cohort_day) IN (0, 1, 3, 7, 14, 30)
-            GROUP BY a.cohort_day, day_number, cs.cohort_size
+            CROSS JOIN day_offsets d
+            LEFT JOIN activity act
+              ON act.user_id = a.user_id
+             AND act.activity_day = a.cohort_day + d.day_number
+            WHERE a.cohort_day + d.day_number <= CURRENT_DATE
+            GROUP BY a.cohort_day, d.day_number, cs.cohort_size
             ORDER BY a.cohort_day, day_number
-        """)
+        """, start_date, end_date)
     return pd.DataFrame(rows, columns=['cohort_day', 'day_number', 'cohort_size', 'retained_users'])
 
 async def _fetch_quality_metrics(pool, start_date, end_date):
@@ -308,6 +318,8 @@ async def _fetch_habit_metrics(pool, start_date, end_date):
                 COUNT(*) AS active_user_days,
                 COALESCE(SUM(meals), 0) AS total_meals,
                 COUNT(*) FILTER (WHERE meals >= 2) AS user_days_2plus,
+                COUNT(*) FILTER (WHERE meals >= 3) AS user_days_3plus,
+                COUNT(*) FILTER (WHERE meals >= 5) AS user_days_5plus,
                 AVG(meals::float) AS avg_meals_per_active_day
             FROM daily
         """, start_date, end_date)
@@ -542,8 +554,8 @@ def fetch_total_paying_users_cached():
     return loop.run_until_complete(_fetch_total_paying_users(pool))
 
 @st.cache_data(ttl=600)
-def fetch_day_retention_cached(anchor):
-    return loop.run_until_complete(_fetch_day_retention(pool, anchor))
+def fetch_day_retention_cached(anchor, start_date, end_date):
+    return loop.run_until_complete(_fetch_day_retention(pool, anchor, start_date, end_date))
 
 @st.cache_data(ttl=600)
 def fetch_quality_metrics_cached(start_date, end_date):
@@ -773,6 +785,80 @@ def plot_day_retention_heatmap(df, title):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def plot_day_retention_readable(df, title):
+    required_columns = {'cohort_day', 'day_number', 'cohort_size', 'retained_users'}
+    if df.empty or not required_columns.issubset(df.columns):
+        st.info("Недостаточно данных для retention-графика.")
+        return
+
+    df = df.copy()
+    df = df[df['day_number'].isin([1, 3, 7, 14, 30])]
+    if df.empty:
+        st.info("Недостаточно созревших когорт для D1/D3/D7/D14/D30.")
+        return
+
+    df['cohort_day'] = pd.to_datetime(df['cohort_day'])
+    df['retention'] = (
+        (df['retained_users'] / df['cohort_size'])
+        .replace([float('inf'), -float('inf')], 0)
+        .fillna(0)
+        * 100
+    )
+    df['period'] = df['day_number'].map(lambda d: f"D{int(d)}")
+
+    summary = (
+        df.groupby(['day_number', 'period'], as_index=False)
+        .agg(retained_users=('retained_users', 'sum'), cohort_users=('cohort_size', 'sum'))
+        .sort_values('day_number')
+    )
+    summary['retention'] = (
+        (summary['retained_users'] / summary['cohort_users'])
+        .replace([float('inf'), -float('inf')], 0)
+        .fillna(0)
+        * 100
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=summary['period'],
+        y=summary['retention'],
+        text=[f"{value:.1f}%" for value in summary['retention']],
+        textposition="outside",
+        customdata=summary[['retained_users', 'cohort_users']],
+        hovertemplate="%{x}<br>Retention: %{y:.1f}%<br>Retained: %{customdata[0]} / %{customdata[1]}<extra></extra>",
+        marker_color="#2E7D32",
+        name="Weighted average",
+    ))
+    fig.update_layout(
+        title=f"{title}: средний retention за период",
+        xaxis_title="День после старта",
+        yaxis_title="Retention, %",
+        yaxis=dict(range=[0, max(10, min(100, float(summary['retention'].max() or 0) * 1.25))]),
+        margin=dict(l=50, r=30, t=70, b=50),
+        height=360,
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    trend = df.sort_values(['cohort_day', 'day_number'])
+    fig_trend = px.line(
+        trend,
+        x='cohort_day',
+        y='retention',
+        color='period',
+        markers=True,
+        custom_data=['period', 'retained_users', 'cohort_size'],
+        category_orders={'period': ['D1', 'D3', 'D7', 'D14', 'D30']},
+        labels={'cohort_day': 'Когорта', 'retention': 'Retention, %', 'period': 'День'},
+        title=f"{title}: динамика по когортам",
+    )
+    fig_trend.update_traces(
+        hovertemplate="%{x|%Y-%m-%d}<br>%{customdata[0]}: %{y:.1f}%<br>Retained: %{customdata[1]} / %{customdata[2]}<extra></extra>"
+    )
+    fig_trend.update_layout(height=420, margin=dict(l=50, r=30, t=70, b=50), yaxis=dict(range=[0, 100]))
+    st.plotly_chart(fig_trend, use_container_width=True)
+
+
 def money_from_minor(amount, currency):
     value = float(amount or 0)
     if str(currency).upper() == 'XTR':
@@ -964,18 +1050,25 @@ with tab1:
 
 with tab2:
     st.header("Retention D1/D3/D7/D14/D30 и привычка")
+    r_today = date.today()
+    r_col1, r_col2 = st.columns(2)
+    r_start = r_col1.date_input("Начало периода когорт", value=r_today - timedelta(days=59), key="retention_start")
+    r_end = r_col2.date_input("Конец периода когорт", value=r_today, key="retention_end")
     retention_anchor = st.radio(
         "Точка отсчета retention",
         ["registration", "first_meal"],
         horizontal=True,
         format_func=lambda x: "Регистрация" if x == "registration" else "Первый сохраненный прием",
     )
-    with st.spinner("Считаем дневной retention..."):
-        day_retention_df = fetch_day_retention_cached(retention_anchor)
-    plot_day_retention_heatmap(
-        day_retention_df,
-        "Retention от регистрации" if retention_anchor == "registration" else "Retention от первого приема пищи",
-    )
+    if r_start <= r_end:
+        retention_title = "Retention от регистрации" if retention_anchor == "registration" else "Retention от первого приема пищи"
+        with st.spinner("Считаем дневной retention..."):
+            day_retention_df = fetch_day_retention_cached(retention_anchor, r_start, r_end)
+        plot_day_retention_readable(day_retention_df, retention_title)
+        with st.expander("Heatmap по когортам"):
+            plot_day_retention_heatmap(day_retention_df, retention_title)
+    else:
+        st.error("Начало периода не может быть позже конца.")
 
     st.markdown("#### Habit metrics")
     h_today = date.today()
@@ -983,12 +1076,14 @@ with tab2:
     h_end = st.date_input("Конец периода", value=h_today, key="habit_end")
     if h_start <= h_end:
         habit_summary, streak_df, returned_after_reminder = fetch_habit_metrics_cached(h_start, h_end)
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
         col1.metric("Active users", habit_summary.get("active_users", 0) or 0)
         col2.metric("Meals", habit_summary.get("total_meals", 0) or 0)
         col3.metric("Avg meals / active day", f"{habit_summary.get('avg_meals_per_active_day') or 0:.2f}")
         col4.metric("User-days 2+ meals", habit_summary.get("user_days_2plus", 0) or 0)
-        col5.metric("Returned after reminder", returned_after_reminder)
+        col5.metric("User-days 3+ meals", habit_summary.get("user_days_3plus", 0) or 0)
+        col6.metric("User-days 5+ meals", habit_summary.get("user_days_5plus", 0) or 0)
+        col7.metric("Returned after reminder", returned_after_reminder)
         if not streak_df.empty:
             st.bar_chart(streak_df.set_index("logging_days"))
     else:
