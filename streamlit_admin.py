@@ -16,22 +16,25 @@ st.set_page_config(layout="wide")
 DB_URL = st.secrets["DATABASE_URL"]
 
 # --- УПРАВЛЕНИЕ ЦИКЛОМ ASYNCIO ---
+# Важно: не использовать Streamlit-внутренний running loop для run_until_complete().
+# В противном случае появляется CachedFunctionReturnedAwaitableError и конфликт
+# между event loop Streamlit и loop asyncpg.
 
 @st.cache_resource
 def get_event_loop():
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop
 
 @st.cache_resource
-def get_db_pool(_loop):
-    return _loop.run_until_complete(asyncpg.create_pool(dsn=DB_URL, loop=_loop))
+def get_db_pool():
+    loop = get_event_loop()
+    return loop.run_until_complete(
+        asyncpg.create_pool(dsn=DB_URL, min_size=1, max_size=10)
+    )
 
 loop = get_event_loop()
-pool = get_db_pool(loop)
+pool = get_db_pool()
 
 # --- АСИНХРОННЫЕ ФУНКЦИИ ---
 # (Они остаются без изменений)
