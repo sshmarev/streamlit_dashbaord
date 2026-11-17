@@ -27,14 +27,18 @@ def get_event_loop():
     return loop
 
 @st.cache_resource
-def get_db_pool():
+def get_db_pool_resource():
     loop = get_event_loop()
-    return loop.run_until_complete(
+    pool = loop.run_until_complete(
         asyncpg.create_pool(dsn=DB_URL, min_size=1, max_size=10)
     )
+    # asyncpg.Pool implements the awaitable protocol, so Streamlit refuses to
+    # cache it directly. A regular container keeps the initialized pool while
+    # presenting a non-awaitable value to st.cache_resource.
+    return {"pool": pool}
 
 loop = get_event_loop()
-pool = get_db_pool()
+pool = get_db_pool_resource()["pool"]
 
 # --- АСИНХРОННЫЕ ФУНКЦИИ ---
 # (Они остаются без изменений)
